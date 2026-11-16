@@ -8,7 +8,7 @@ source.exclude_dirs = tests, tools, bin, .buildozer, .github
 version = 1.0.0
 
 # Librerias que se empaquetan en el APK
-requirements = python3,kivy==2.3.1,filetype,plyer,pillow,openpyxl,et_xmlfile,mapview,requests,urllib3,chardet,idna,certifi,androidstorage4kivy
+requirements = python3,kivy==2.3.1,filetype,plyer,pillow,openpyxl,et_xmlfile,mapview,requests,urllib3,charset_normalizer==3.3.2,chardet,idna,certifi,androidstorage4kivy
 
 icon.filename = %(source.dir)s/assets/icon.png
 presplash.filename = %(source.dir)s/assets/presplash.png
