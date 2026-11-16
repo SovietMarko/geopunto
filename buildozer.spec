@@ -19,7 +19,7 @@ fullscreen = 0
 android.permissions = INTERNET, ACCESS_NETWORK_STATE, ACCESS_FINE_LOCATION, ACCESS_COARSE_LOCATION, CAMERA, (name=android.permission.WRITE_EXTERNAL_STORAGE;maxSdkVersion=28), (name=android.permission.READ_EXTERNAL_STORAGE;maxSdkVersion=32)
 android.api = 34
 android.minapi = 24
-android.archs = arm64-v8a, armeabi-v7a
+android.archs = arm64-v8a
 android.accept_sdk_license = True
 android.allow_backup = True
 p4a.branch = master
