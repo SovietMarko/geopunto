@@ -25,6 +25,11 @@ con marca de agua y exportar todo a Excel.
      `Foto_1` ... `Foto_5` a la derecha.
    El archivo queda en **Documentos/Geopunto** del teléfono y el botón
    **Compartir** permite enviarlo por WhatsApp, correo, Drive, etc.
+6. **PDF fotos**: crea el registro fotográfico en PDF con una portada y una
+   página por foto. Cada página lleva el número de punto, la primera columna de
+   tu tabla, la coordenada y la fecha, y la foto en su resolución original con
+   la marca de agua en la esquina inferior derecha. Se guarda en
+   **Documentos/Geopunto**.
 
 ## Archivos
 
@@ -72,5 +77,5 @@ python -m pytest tests
 - Las capas de Google se cargan directo desde sus servidores de mosaicos, algo
   que los términos de Google no permiten formalmente. Para uso personal suele
   funcionar; si algún día deja de cargar, cambia a OpenStreetMap en el selector.
-- Las fotos se reducen a 2048 px por lado para que el proyecto y el Excel no
-  pesen demasiado.
+- Las fotos se guardan en su resolución original. En el Excel van como
+  miniaturas y en el PDF a tamaño completo.

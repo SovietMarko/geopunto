@@ -48,7 +48,7 @@ def test_full_flow(tmp_path):
     again = geodata.Project.load(proj.folder)
     assert len(again.points) == 2 and again.points[0]["id"] == 1 and again.points[1]["id"] == 2
     first = Image.open(again.photo_path(again.points[0]["fotos"][0]))
-    assert first.size == (2048, 1536)  # reducida y girada segun EXIF
+    assert first.size == (4000, 3000)  # resolucion original, girada segun EXIF
 
     out = str(tmp_path / "salida.xlsx")
     geodata.export_excel(again, out)
@@ -65,3 +65,18 @@ def test_full_flow(tmp_path):
     again.delete_point(1)
     assert len(geodata.Project.load(proj.folder).points) == 1
     assert os.listdir(again.photos_dir) == []
+
+
+def test_photo_pdf(tmp_path):
+    proj = geodata.Project.create(str(tmp_path), "PDF", ["Especie"])
+    p = proj.new_point(4.6, -74.08)
+    p["valores"]["Especie"] = "Roble"
+    proj.add_photo(p, make_photo(str(tmp_path / "a.jpg"), size=(1200, 1600)))
+    proj.add_photo(p, make_photo(str(tmp_path / "b.jpg"), size=(1600, 1200)))
+    proj.save_point(p)
+    proj.save_point(proj.new_point(4.61, -74.09))
+    out = str(tmp_path / "r.pdf")
+    geodata.export_photo_pdf(proj, out)
+    data = open(out, "rb").read()
+    assert data.startswith(b"%PDF")
+    assert data.count(b"/Type /Page\n") + data.count(b"/Type /Page ") >= 4 or data.count(b"/Page") >= 4

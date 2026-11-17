@@ -225,44 +225,136 @@ def _load_font(font_path, size):
         return ImageFont.load_default()
 
 
-def watermark_image(src, dst, lines, font_path=None, max_side=2048):
-    """Abre src, corrige la orientacion, reduce a max_side y escribe las lineas
-    en una franja oscura de todo el ancho en la parte inferior. El texto se
-    ajusta al ancho de la foto; la primera linea (coordenadas) va en amarillo."""
+def watermark_image(src, dst, lines, font_path=None, max_side=None):
+    """Abre src, corrige la orientacion y escribe las lineas en un cuadro
+    oscuro en la esquina inferior derecha. Por defecto conserva la resolucion
+    original (max_side=None). La primera linea (coordenadas) va en amarillo."""
     img = Image.open(src)
     img = ImageOps.exif_transpose(img).convert("RGB")
-    if max(img.size) > max_side:
+    if max_side and max(img.size) > max_side:
         img.thumbnail((max_side, max_side), Image.LANCZOS)
     w, h = img.size
 
-    # Tamano de letra: el mayor que quepa en el 94% del ancho, sin pasar del
-    # 6.5% del ancho ni de 1/22 del alto.
+    # El cuadro ocupa cerca del 62% del lado corto: se lee bien sin tapar la foto.
     probe = _load_font(font_path, 100)
     tmp = ImageDraw.Draw(Image.new("RGB", (10, 10)))
     widest = max(tmp.textbbox((0, 0), ln, font=probe)[2] for ln in lines) or 1
-    size = int(100 * (w * 0.94) / widest)
-    size = max(16, min(size, int(w * 0.065), int(h / 22)))
+    size = max(16, int(100 * (min(w, h) * 0.62) / widest))
     font = _load_font(font_path, size)
     stroke = max(2, size // 12)
 
-    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    pad = int(size * 0.45)
+    draw = ImageDraw.Draw(img, "RGBA")
+    pad = int(size * 0.5)
     gap = int(size * 0.25)
     boxes = [draw.textbbox((0, 0), ln, font=font, stroke_width=stroke) for ln in lines]
     line_h = max(b[3] - b[1] for b in boxes)
+    block_w = max(b[2] - b[0] for b in boxes) + 2 * pad
     block_h = len(lines) * line_h + (len(lines) - 1) * gap + 2 * pad
-    y0 = h - block_h
-    draw.rectangle([0, y0, w, h], fill=(0, 0, 0, 200))
+    margin = int(min(w, h) * 0.02)
+    x0, y0 = w - block_w - margin, h - block_h - margin
+    draw.rounded_rectangle([x0, y0, w - margin, h - margin], radius=pad,
+                           fill=(0, 0, 0, 190))
     y = y0 + pad
     for i, (ln, b) in enumerate(zip(lines, boxes)):
         color = (255, 230, 0, 255) if i == 0 else (255, 255, 255, 255)
-        draw.text((pad - b[0], y - b[1]), ln, font=font, fill=color,
+        draw.text((x0 + pad - b[0], y - b[1]), ln, font=font, fill=color,
                   stroke_width=stroke, stroke_fill=(0, 0, 0, 255))
         y += line_h + gap
-    out = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
-    out.save(dst, "JPEG", quality=90)
+    img.save(dst, "JPEG", quality=92)
     return dst
+
+
+# --------------------------------------------------------------------------
+# Registro fotografico en PDF
+# --------------------------------------------------------------------------
+def _wrap(draw, text, font, max_w):
+    words, out, cur = text.split(), [], ""
+    for wd in words:
+        test = (cur + " " + wd).strip()
+        if draw.textlength(test, font=font) <= max_w or not cur:
+            cur = test
+        else:
+            out.append(cur)
+            cur = wd
+    if cur:
+        out.append(cur)
+    return out or [""]
+
+
+def _header_page(photo, header_lines, font_path, title_idx=0):
+    """Devuelve una imagen con una franja blanca de encabezado arriba y la foto
+    debajo, sin cambiar la resolucion de la foto."""
+    w = photo.width
+    size = max(18, int(w * 0.03))
+    font_b = _load_font(font_path, size)
+    font_r = _load_font(font_path, int(size * 0.85))
+    tmp = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+    pad = int(size * 0.8)
+    rows = []
+    for i, ln in enumerate(header_lines):
+        f = font_b if i == title_idx else font_r
+        for part in _wrap(tmp, ln, f, w - 2 * pad):
+            rows.append((part, f, i == title_idx))
+    row_h = int(size * 1.35)
+    head_h = 2 * pad + row_h * len(rows)
+    page = Image.new("RGB", (w, head_h + photo.height), (255, 255, 255))
+    d = ImageDraw.Draw(page)
+    y = pad
+    for text, f, is_title in rows:
+        d.text((pad, y), text, font=f, fill=(16, 42, 67) if is_title else (40, 40, 40))
+        y += row_h
+    d.line([(pad, head_h - 4), (w - pad, head_h - 4)], fill=(31, 111, 139), width=max(2, size // 8))
+    page.paste(photo, (0, head_h))
+    return page
+
+
+def export_photo_pdf(project, out_path, font_path=None, page_width_in=8.27):
+    """Registro fotografico: portada y una pagina por foto, con el punto, la
+    coordenada, la fecha y el valor de la primera columna. Las fotos van a su
+    resolucion original. Las paginas se agregan una por una para no llenar la
+    memoria del telefono."""
+    first_col = project.columns[0] if project.columns else None
+    n_photos = sum(len(p["fotos"]) for p in project.points)
+
+    cover = Image.new("RGB", (1240, 1754), (255, 255, 255))
+    d = ImageDraw.Draw(cover)
+    ft = _load_font(font_path, 64)
+    fr = _load_font(font_path, 36)
+    y = 220
+    for ln in _wrap(d, "Registro fotografico", ft, 1040):
+        d.text((100, y), ln, font=ft, fill=(16, 42, 67)); y += 84
+    for ln in _wrap(d, project.name, ft, 1040):
+        d.text((100, y), ln, font=ft, fill=(31, 111, 139)); y += 84
+    y += 40
+    for ln in ["Puntos: %d" % len(project.points), "Fotos: %d" % n_photos,
+               "Sistema de coordenadas: " + CRS_LABEL,
+               "Generado: %s" % datetime.now().strftime(DATE_FMT)]:
+        d.text((100, y), ln, font=fr, fill=(60, 60, 60)); y += 56
+    cover.save(out_path, "PDF", resolution=150.0)
+
+    for p in project.points:
+        header = ["Punto %d" % p["id"]]
+        if first_col:
+            header.append("%s: %s" % (first_col, p["valores"].get(first_col, "") or "-"))
+        header.append("Lat: %s   Lon: %s   (%s)" % (format_coord(p["lat"]), format_coord(p["lon"]), CRS_LABEL))
+        header.append("Fecha: %s" % p["fecha"])
+        fotos = [r for r in p["fotos"] if os.path.exists(project.photo_path(r))]
+        if not fotos:
+            blank = Image.new("RGB", (1240, 300), (245, 245, 245))
+            ImageDraw.Draw(blank).text((60, 120), "Sin fotos", font=_load_font(font_path, 40), fill=(120, 120, 120))
+            page = _header_page(blank, header, font_path)
+            page.save(out_path, "PDF", resolution=page.width / page_width_in, append=True)
+            continue
+        for j, rel in enumerate(fotos):
+            with Image.open(project.photo_path(rel)) as im:
+                photo = im.convert("RGB")
+            lines = list(header)
+            lines[0] = "Punto %d  -  Foto %d de %d" % (p["id"], j + 1, len(fotos))
+            page = _header_page(photo, lines, font_path)
+            del photo
+            page.save(out_path, "PDF", resolution=page.width / page_width_in, append=True, quality=92)
+            del page
+    return out_path
 
 
 # --------------------------------------------------------------------------

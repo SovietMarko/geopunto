@@ -294,8 +294,12 @@ KV = r"""
                     on_release: app.open_screen('points')
                 AppButton:
                     height: dp(48)
-                    text: 'Exportar Excel'
+                    text: 'Excel'
                     on_release: app.export_excel()
+                AppButton:
+                    height: dp(48)
+                    text: 'PDF fotos'
+                    on_release: app.export_pdf()
 
 <PointScreen>:
     BoxLayout:
@@ -878,35 +882,47 @@ class GeopuntoApp(App):
                 return
 
     def export_excel(self):
+        self._export("xlsx", "Generando Excel...", geodata.export_excel,
+                     "Excel listo", "Hoja 1: Datos\nHoja 2: Datos con fotos")
+
+    def export_pdf(self):
+        if not any(p["fotos"] for p in (self.project.points if self.project else [])):
+            message("Registro fotografico", "El proyecto no tiene fotos todavia.")
+            return
+        self._export("pdf", "Generando PDF de fotos...\n(puede tardar con muchas fotos)",
+                     lambda proj, out: geodata.export_photo_pdf(proj, out, WATERMARK_FONT),
+                     "PDF listo", "Una pagina por foto con punto, coordenada,\nfecha y %s." % (
+                         self.project.columns[0] if self.project.columns else "datos"))
+
+    def _export(self, ext, busy_text, func, title, detail):
         if not self.project.points:
             message("Exportar", "El proyecto no tiene puntos todavia.")
             return
-        popup = busy_popup("Generando Excel...")
-        name = "%s_%s.xlsx" % (geodata.slugify(self.project.name), datetime.now().strftime("%Y%m%d_%H%M%S"))
+        popup = busy_popup(busy_text)
+        name = "%s_%s.%s" % (geodata.slugify(self.project.name), datetime.now().strftime("%Y%m%d_%H%M%S"), ext)
         out = os.path.join(self.export_dir, name)
 
         def work():
             err = None
             try:
-                geodata.export_excel(self.project, out)
+                func(self.project, out)
             except Exception as e:  # noqa
                 err = str(e)
-            self._export_done(popup, out, err)
+            self._export_done(popup, out, err, title, detail)
         threading.Thread(target=work, daemon=True).start()
 
     @mainthread
-    def _export_done(self, popup, out, err):
+    def _export_done(self, popup, out, err, title, detail):
         popup.dismiss()
         if err:
             message("Error al exportar", err)
             return
         where, uri = droid.save_to_shared(out)
-        text = "Archivo: %s\nGuardado en: %s\n\nHoja 1: Datos\nHoja 2: Datos con fotos" % (
-            os.path.basename(out), where)
+        text = "Archivo: %s\nGuardado en: %s\n\n%s" % (os.path.basename(out), where, detail)
         buttons = [("Aceptar", None)]
         if uri is not None:
             buttons.append(("Compartir", lambda: droid.share_file(uri)))
-        message("Excel listo", text, buttons)
+        message(title, text, buttons)
 
 
 if __name__ == "__main__":
