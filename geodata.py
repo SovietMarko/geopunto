@@ -227,32 +227,41 @@ def _load_font(font_path, size):
 
 def watermark_image(src, dst, lines, font_path=None, max_side=2048):
     """Abre src, corrige la orientacion, reduce a max_side y escribe las lineas
-    de texto sobre una franja semitransparente en la esquina inferior."""
+    en una franja oscura de todo el ancho en la parte inferior. El texto se
+    ajusta al ancho de la foto; la primera linea (coordenadas) va en amarillo."""
     img = Image.open(src)
     img = ImageOps.exif_transpose(img).convert("RGB")
     if max(img.size) > max_side:
         img.thumbnail((max_side, max_side), Image.LANCZOS)
     w, h = img.size
-    size = max(14, int(min(w, h) * 0.035))
+
+    # Tamano de letra: el mayor que quepa en el 94% del ancho, sin pasar del
+    # 6.5% del ancho ni de 1/22 del alto.
+    probe = _load_font(font_path, 100)
+    tmp = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+    widest = max(tmp.textbbox((0, 0), ln, font=probe)[2] for ln in lines) or 1
+    size = int(100 * (w * 0.94) / widest)
+    size = max(16, min(size, int(w * 0.065), int(h / 22)))
     font = _load_font(font_path, size)
+    stroke = max(2, size // 12)
 
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    pad = int(size * 0.6)
-    gap = int(size * 0.3)
-    boxes = [draw.textbbox((0, 0), ln, font=font) for ln in lines]
+    pad = int(size * 0.45)
+    gap = int(size * 0.25)
+    boxes = [draw.textbbox((0, 0), ln, font=font, stroke_width=stroke) for ln in lines]
     line_h = max(b[3] - b[1] for b in boxes)
-    block_w = max(b[2] - b[0] for b in boxes) + 2 * pad
     block_h = len(lines) * line_h + (len(lines) - 1) * gap + 2 * pad
-    x0, y0 = 0, h - block_h
-    draw.rectangle([x0, y0, min(w, block_w), h], fill=(0, 0, 0, 150))
+    y0 = h - block_h
+    draw.rectangle([0, y0, w, h], fill=(0, 0, 0, 200))
     y = y0 + pad
-    for ln, b in zip(lines, boxes):
-        draw.text((x0 + pad + 2, y - b[1] + 2), ln, font=font, fill=(0, 0, 0, 255))
-        draw.text((x0 + pad, y - b[1]), ln, font=font, fill=(255, 235, 59, 255))
+    for i, (ln, b) in enumerate(zip(lines, boxes)):
+        color = (255, 230, 0, 255) if i == 0 else (255, 255, 255, 255)
+        draw.text((pad - b[0], y - b[1]), ln, font=font, fill=color,
+                  stroke_width=stroke, stroke_fill=(0, 0, 0, 255))
         y += line_h + gap
     out = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
-    out.save(dst, "JPEG", quality=88)
+    out.save(dst, "JPEG", quality=90)
     return dst
 
 
