@@ -2,6 +2,8 @@
 """Todo lo especifico de Android: permisos, camara, galeria, almacenamiento
 compartido y compartir archivos. En PC estas funciones no hacen nada o usan
 alternativas para poder probar la app."""
+import time
+
 from kivy.clock import Clock
 from kivy.logger import Logger
 from kivy.utils import platform
@@ -210,7 +212,12 @@ class GPSReader(object):
         self.status_cb = status_cb or (lambda t: None)
         self._lm = None
         self._listener = None
+        self._nmea = None
         self.started = False
+        self.t_start = None
+        self._view = {}      # constelacion -> satelites a la vista (NMEA GSV)
+        self._used = None    # satelites usados en la solucion (NMEA GGA)
+        self.nmea_ok = False
 
     def _status(self, text):
         Clock.schedule_once(lambda dt: self.status_cb(text))
@@ -284,6 +291,22 @@ class GPSReader(object):
                 ok = ok or provider == "gps"
             except Exception as exc:
                 Logger.warning("Geopunto: proveedor %s no disponible: %s" % (provider, exc))
+        # Diagnostico: satelites vistos/usados leyendo las sentencias NMEA.
+        self._view, self._used, self.nmea_ok = {}, None, False
+        try:
+            class _Nmea(PythonJavaClass):
+                __javainterfaces__ = ["android/location/OnNmeaMessageListener"]
+
+                @java_method("(Ljava/lang/String;J)V")
+                def onNmeaMessage(self, message, timestamp):
+                    reader._on_nmea(str(message))
+
+            Handler = autoclass("android.os.Handler")
+            self._nmea = _Nmea()
+            # Con Handler explicito: el hilo de Python no tiene Looper propio.
+            self.nmea_ok = bool(self._lm.addNmeaListener(self._nmea, Handler(Looper.getMainLooper())))
+        except Exception as exc:
+            Logger.warning("Geopunto: sin diagnostico NMEA: %s" % exc)
         # posicion previa (si existe) para no empezar de cero
         try:
             last = self._lm.getLastKnownLocation("gps")
@@ -291,7 +314,8 @@ class GPSReader(object):
                 self._deliver(last, stale=True)
         except Exception:
             pass
-        self.started = True
+        self.started = ok
+        self.t_start = time.time()
         if not ok:
             self._status("No se pudo iniciar el GPS (revisa permisos de ubicacion precisa)")
         elif not self.gps_enabled():
@@ -310,12 +334,66 @@ class GPSReader(object):
             return
         Clock.schedule_once(lambda dt: self.callback(*data))
 
+    def _on_nmea(self, text):
+        try:
+            for line in text.strip().splitlines():
+                line = line.strip()
+                if not line.startswith("$") or len(line) < 7:
+                    continue
+                f = line[1:].split("*")[0].split(",")
+                talker, kind = f[0][:2], f[0][2:]
+                if kind == "GSV" and len(f) > 3 and f[3].isdigit():
+                    self._view[talker] = int(f[3])
+                elif kind == "GGA" and len(f) > 7 and f[7].isdigit():
+                    self._used = int(f[7])
+        except Exception:
+            pass
+
+    def sats(self):
+        """(vistos, usados) o None si el telefono no entrega NMEA."""
+        if not self.nmea_ok:
+            return None
+        return sum(self._view.values()), (self._used or 0)
+
+    def diag_text(self):
+        if not IS_ANDROID or not self.started:
+            return ""
+        secs = int(time.time() - self.t_start) if self.t_start else 0
+        parts = []
+        sv = self.sats()
+        if sv is not None:
+            parts.append("Satelites: %d vistos, %d usados" % sv)
+        parts.append("%d s" % secs)
+        return "  |  ".join(parts)
+
+    def hint(self):
+        """Consejo segun lo que se ve, para que el usuario sepa que esperar."""
+        if not IS_ANDROID:
+            return ""
+        if not self.has_precise_permission():
+            return "Falta el permiso de ubicacion precisa."
+        if not self.gps_enabled():
+            return "La ubicacion del telefono esta apagada."
+        sv = self.sats()
+        secs = int(time.time() - self.t_start) if self.t_start else 0
+        if sv is None:
+            return "Sin datos moviles la primera posicion puede tardar varios minutos al aire libre."
+        if sv[0] == 0:
+            return ("No se ve ningun satelite. Sal a cielo abierto, lejos de techos, "
+                    "y quita el telefono de la funda o del bolsillo." if secs > 30 else "Buscando satelites...")
+        if sv[1] == 0:
+            return ("Se ven %d satelites; falta calcular la posicion. Sin datos moviles el primer "
+                    "arranque puede tardar de 2 a 10 minutos. Deja la app abierta y quieto el telefono." % sv[0])
+        return ""
+
     def stop(self):
-        if self._lm is not None and self._listener is not None:
-            try:
-                self._lm.removeUpdates(self._listener)
-            except Exception:
-                pass
+        if self._lm is not None:
+            for fn, obj in (("removeUpdates", self._listener), ("removeNmeaListener", self._nmea)):
+                if obj is not None:
+                    try:
+                        getattr(self._lm, fn)(obj)
+                    except Exception:
+                        pass
         self.started = False
 
 

@@ -111,3 +111,22 @@ def test_export_gis(tmp_path):
     assert "Roble" in list(r.record(0))
     gj = json.loads(zf.read("Finca_Nandu.geojson"))
     assert gj["features"][0]["properties"]["Especie arbórea"] == "Roble"
+
+
+def test_nmea_diagnostico(monkeypatch):
+    """El diagnostico de satelites lee sentencias NMEA reales (sin Kivy en pantalla)."""
+    pytest.importorskip("kivy")
+    import android_bridge as ab
+    monkeypatch.setattr(ab, "IS_ANDROID", True)
+    r = ab.GPSReader(lambda *a: None)
+    r.started, r.nmea_ok, r.t_start = True, True, ab.time.time() - 100
+    monkeypatch.setattr(r, "has_precise_permission", lambda: True)
+    monkeypatch.setattr(r, "gps_enabled", lambda: True)
+    assert "No se ve ningun satelite" in r.hint()
+    r._on_nmea("$GPGSV,3,1,10,02,45,120,30,05,60,010,28,07,20,200,25,09,15,300,20*7D\r\n")
+    r._on_nmea("$GLGSV,2,1,06,65,40,100,22,66,30,200,20,67,10,050,18,68,50,300,25*4B")
+    assert r.sats() == (16, 0)
+    assert "Se ven 16 satelites" in r.hint()
+    r._on_nmea("$GNGGA,123519,0436.582,N,07404.905,W,1,07,1.2,2600.0,M,0.0,M,,*5A")
+    assert r.sats() == (16, 7) and r.hint() == ""
+    assert "16 vistos, 7 usados" in r.diag_text()

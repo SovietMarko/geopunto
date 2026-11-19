@@ -39,6 +39,10 @@ con marca de agua y exportar todo a Excel.
 - Al pulsar **Tomar punto aquí** se juntan hasta 15 lecturas del GPS y se
   promedian (las más precisas pesan más). Termina sola o con *Usar ahora*.
 - Activa la **ubicación precisa** para Geopunto en los permisos de Android.
+- Mientras buscas posición, la app muestra cuántos **satélites ve y usa** y un
+  consejo. Si ve satélites pero no hay posición, solo hay que esperar (sin
+  datos móviles el primer arranque puede tardar de 2 a 10 minutos). Si no ve
+  ninguno, hay que salir a cielo abierto.
 
 ## Archivos
 

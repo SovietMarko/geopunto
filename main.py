@@ -592,6 +592,9 @@ class MapScreen(Screen):
                    "cache": "ultima posicion guardada"}.get(prov, prov or "")
             if prov != "gps" and droid.IS_ANDROID:
                 src += " - esperando satelites"
+            sv = app.gps.sats() if droid.IS_ANDROID else None
+            if sv is not None:
+                src += " - %d sat" % sv[1]
             self.status_text = ("[b]Lat:[/b] %s   [b]Lon:[/b] %s%s\n[size=12sp]EPSG:4326 - WGS 84  |  %s[/size]"
                                 % (format_coord(lat), format_coord(lon), acc_txt, src))
             self.show_cross = False
@@ -599,14 +602,21 @@ class MapScreen(Screen):
             self.status_text = "PC sin GPS: se usara el centro del mapa (+)\n[size=12sp]EPSG:4326 - WGS 84[/size]"
             self.show_cross = True
         else:
-            self.status_text = "Buscando senal GPS...\n[size=12sp]%s[/size]" % (app.gps_status or "")
+            diag, hint = app.gps.diag_text(), app.gps.hint()
+            self.status_text = "Buscando senal GPS...\n[size=12sp]%s\n%s[/size]" % (
+                diag or (app.gps_status or ""), hint)
 
     def center_on_me(self):
         app = App.get_running_app()
         if app.gps_fix:
             self.ids.map.center_on(app.gps_fix[0], app.gps_fix[1])
         else:
-            message("GPS", "Todavia no hay posicion GPS. Sal a cielo abierto y espera unos segundos.")
+            diag, hint = app.gps.diag_text(), app.gps.hint()
+            message("Sin posicion GPS todavia",
+                    "%s\n\n%s\n\nSi acabas de encender el GPS o no tienes datos moviles, el primer "
+                    "posicionamiento puede tardar varios minutos." % (diag or "Esperando...", hint),
+                    (("Aceptar", None), ("Reiniciar GPS", app.restart_gps),
+                     ("Ajustes", droid.open_location_settings)))
 
     def take_point(self):
         app = App.get_running_app()
@@ -673,9 +683,11 @@ class CapturePopup(Popup):
         secs = int((datetime.now() - self.t0).total_seconds())
         n = len(self.samples)
         if n == 0:
-            self.lbl.text = ("Esperando lecturas del GPS satelital... (%d s)\n\n"
-                             "[size=13sp]Sin datos moviles el primer posicionamiento puede tardar 1 a 3 "
-                             "minutos. Quedate al aire libre, lejos de techos y edificios.[/size]" % secs)
+            g = App.get_running_app().gps
+            self.lbl.text = ("Esperando lecturas del GPS satelital... (%d s)\n%s\n\n"
+                             "[size=13sp]%s\nSin datos moviles el primer posicionamiento puede tardar varios "
+                             "minutos. Quedate al aire libre, lejos de techos y edificios.[/size]" % (
+                                 secs, g.diag_text(), g.hint()))
             return
         lat, lon, est, alt, used = geodata.average_fixes(self.samples)
         self.b_use.disabled = False
@@ -862,6 +874,8 @@ class GeopuntoApp(App):
             os.makedirs(d, exist_ok=True)
         self.history = []
         self.gps = droid.GPSReader(self._on_location, self._on_gps_status)
+        self._warned_precise = False
+        Clock.schedule_interval(lambda dt: self._refresh_status(), 2.0)
         Builder.load_string(KV)
         self.sm = ScreenManager(transition=NoTransition())
         self.sm.add_widget(HomeScreen(name="home"))
@@ -888,7 +902,8 @@ class GeopuntoApp(App):
             self.gps.start()
         except Exception as e:
             self.gps_status = "GPS no disponible: %s" % e
-        if not self.gps.has_precise_permission():
+        if not self.gps.has_precise_permission() and not self._warned_precise:
+            self._warned_precise = True
             message("Ubicacion precisa", "La app solo tiene permiso de ubicacion aproximada.\n"
                     "En Ajustes > Apps > Geopunto > Permisos > Ubicacion, activa 'Usar ubicacion precisa'.")
         self._refresh_status()
@@ -916,8 +931,14 @@ class GeopuntoApp(App):
         return True  # el GPS sigue activo mientras se usa la camara
 
     def on_resume(self):
-        if droid.IS_ANDROID and not self.gps.started:
-            self.start_gps()
+        if droid.IS_ANDROID:
+            self.restart_gps()  # re-registra el GPS por si Android lo detuvo
+
+    def restart_gps(self):
+        if not droid.IS_ANDROID:
+            return
+        self.gps.stop()
+        self.start_gps()
 
     # ----- Navegacion -----
     def open_screen(self, name, replace_history=False):
