@@ -61,6 +61,32 @@ def format_coord(value):
     return "%.7f" % value
 
 
+def average_fixes(samples):
+    """Promedia lecturas GPS [(lat, lon, precision_m, altitud_m), ...].
+
+    Se ponderan por 1/precision^2 (las lecturas mas precisas pesan mas) y se
+    descartan las que tienen el doble de error que la mejor. Devuelve
+    (lat, lon, precision_estimada_m, altitud_m, n_usadas)."""
+    if not samples:
+        raise ValueError("No hay lecturas GPS.")
+    accs = [s[2] for s in samples if s[2]]
+    best = min(accs) if accs else None
+    used = [s for s in samples if not best or not s[2] or s[2] <= max(2 * best, best + 3)]
+    wsum = lat = lon = 0.0
+    alt_w = alt = 0.0
+    for la, lo, acc, al in used:
+        w = 1.0 / max(acc or 10.0, 1.0) ** 2
+        wsum += w
+        lat += la * w
+        lon += lo * w
+        if al is not None:
+            alt += al * w
+            alt_w += w
+    used_acc = sorted(s[2] for s in used if s[2])
+    est = used_acc[len(used_acc) // 2] if used_acc else None  # mediana: estimacion prudente
+    return (lat / wsum, lon / wsum, est, (alt / alt_w) if alt_w else None, len(used))
+
+
 # --------------------------------------------------------------------------
 # Proyectos
 # --------------------------------------------------------------------------
@@ -141,14 +167,16 @@ class Project(object):
         shutil.rmtree(self.folder, ignore_errors=True)
 
     # ---- puntos ----
-    def new_point(self, lat, lon, accuracy=None, when=None):
+    def new_point(self, lat, lon, accuracy=None, when=None, altitude=None, samples=1):
         """Crea un punto (aun no guardado)."""
         when = when or datetime.now()
         return {
             "id": None,
             "lat": float(lat),
             "lon": float(lon),
-            "precision_m": accuracy,
+            "precision_m": None if accuracy is None else round(float(accuracy), 1),
+            "altitud_m": None if altitude is None else round(float(altitude), 1),
+            "muestras": int(samples),
             "fecha": when.strftime(DATE_FMT),
             "valores": {c: "" for c in self.columns},
             "fotos": [],
@@ -281,85 +309,227 @@ def _wrap(draw, text, font, max_w):
     return out or [""]
 
 
-def _header_page(photo, header_lines, font_path, title_idx=0):
-    """Devuelve una imagen con una franja blanca de encabezado arriba y la foto
-    debajo, sin cambiar la resolucion de la foto."""
-    w = photo.width
-    size = max(18, int(w * 0.03))
-    font_b = _load_font(font_path, size)
-    font_r = _load_font(font_path, int(size * 0.85))
-    tmp = ImageDraw.Draw(Image.new("RGB", (10, 10)))
-    pad = int(size * 0.8)
-    rows = []
-    for i, ln in enumerate(header_lines):
-        f = font_b if i == title_idx else font_r
-        for part in _wrap(tmp, ln, f, w - 2 * pad):
-            rows.append((part, f, i == title_idx))
-    row_h = int(size * 1.35)
-    head_h = 2 * pad + row_h * len(rows)
-    page = Image.new("RGB", (w, head_h + photo.height), (255, 255, 255))
-    d = ImageDraw.Draw(page)
-    y = pad
-    for text, f, is_title in rows:
-        d.text((pad, y), text, font=f, fill=(16, 42, 67) if is_title else (40, 40, 40))
-        y += row_h
-    d.line([(pad, head_h - 4), (w - pad, head_h - 4)], fill=(31, 111, 139), width=max(2, size // 8))
-    page.paste(photo, (0, head_h))
-    return page
+def _grid_layout(sizes, box_w, box_h, gap):
+    """Elige filas x columnas que dan la mayor area de foto en el recuadro."""
+    n = len(sizes)
+    best = None
+    for cols in range(1, n + 1):
+        rows = (n + cols - 1) // cols
+        cw = (box_w - gap * (cols - 1)) / float(cols)
+        ch = (box_h - gap * (rows - 1)) / float(rows)
+        area = 0.0
+        for (w, h) in sizes:
+            sc = min(cw / w, ch / h)
+            area += w * sc * h * sc
+        if best is None or area > best[0] + 1:
+            best = (area, cols, rows, cw, ch)
+    return best[1:]
 
 
-def export_photo_pdf(project, out_path, font_path=None, page_width_in=8.27):
-    """Registro fotografico: portada y una pagina por foto, con el punto, la
-    coordenada, la fecha y el valor de la primera columna. Las fotos van a su
-    resolucion original. Las paginas se agregan una por una para no llenar la
-    memoria del telefono."""
+def export_photo_pdf(project, out_path, font_path=None, dpi=250):
+    """Registro fotografico: portada y una hoja A4 por punto con todas sus
+    fotos. El tamano de cada foto depende de cuantas tenga el punto (1 foto
+    ocupa casi toda la hoja; 5 fotos se reparten en una cuadricula). Las hojas
+    se agregan una por una para no llenar la memoria del telefono."""
+    W, H = int(8.27 * dpi), int(11.69 * dpi)
+    margin = int(0.45 * dpi)
     first_col = project.columns[0] if project.columns else None
     n_photos = sum(len(p["fotos"]) for p in project.points)
+    blue, dark, grey = (16, 42, 67), (40, 40, 40), (110, 110, 110)
 
-    cover = Image.new("RGB", (1240, 1754), (255, 255, 255))
+    cover = Image.new("RGB", (W, H), (255, 255, 255))
     d = ImageDraw.Draw(cover)
-    ft = _load_font(font_path, 64)
-    fr = _load_font(font_path, 36)
-    y = 220
-    for ln in _wrap(d, "Registro fotografico", ft, 1040):
-        d.text((100, y), ln, font=ft, fill=(16, 42, 67)); y += 84
-    for ln in _wrap(d, project.name, ft, 1040):
-        d.text((100, y), ln, font=ft, fill=(31, 111, 139)); y += 84
-    y += 40
+    ft = _load_font(font_path, int(dpi * 0.42))
+    fr = _load_font(font_path, int(dpi * 0.2))
+    y = int(H * 0.18)
+    for ln in _wrap(d, "Registro fotografico", ft, W - 2 * margin):
+        d.text((margin, y), ln, font=ft, fill=blue); y += int(dpi * 0.55)
+    for ln in _wrap(d, project.name, ft, W - 2 * margin):
+        d.text((margin, y), ln, font=ft, fill=(31, 111, 139)); y += int(dpi * 0.55)
+    y += int(dpi * 0.3)
     for ln in ["Puntos: %d" % len(project.points), "Fotos: %d" % n_photos,
                "Sistema de coordenadas: " + CRS_LABEL,
                "Generado: %s" % datetime.now().strftime(DATE_FMT)]:
-        d.text((100, y), ln, font=fr, fill=(60, 60, 60)); y += 56
-    cover.save(out_path, "PDF", resolution=150.0)
+        d.text((margin, y), ln, font=fr, fill=dark); y += int(dpi * 0.32)
+    cover.save(out_path, "PDF", resolution=float(dpi))
+    del cover
 
+    f_title = _load_font(font_path, int(dpi * 0.2))
+    f_text = _load_font(font_path, int(dpi * 0.14))
+    f_small = _load_font(font_path, int(dpi * 0.1))
     for p in project.points:
-        header = ["Punto %d" % p["id"]]
+        page = Image.new("RGB", (W, H), (255, 255, 255))
+        d = ImageDraw.Draw(page)
+        y = margin
+        d.text((margin, y), "Punto %d" % p["id"], font=f_title, fill=blue)
+        y += int(dpi * 0.3)
+        lines = []
         if first_col:
-            header.append("%s: %s" % (first_col, p["valores"].get(first_col, "") or "-"))
-        header.append("Lat: %s   Lon: %s   (%s)" % (format_coord(p["lat"]), format_coord(p["lon"]), CRS_LABEL))
-        header.append("Fecha: %s" % p["fecha"])
+            lines.append("%s: %s" % (first_col, p["valores"].get(first_col, "") or "-"))
+        lines.append("Latitud: %s    Longitud: %s" % (format_coord(p["lat"]), format_coord(p["lon"])))
+        extra = CRS_LABEL
+        if p.get("precision_m"):
+            extra += "    Precision: +/- %.1f m" % p["precision_m"]
+        lines.append(extra)
+        lines.append("Fecha: %s" % p["fecha"])
+        for ln in lines:
+            for part in _wrap(d, ln, f_text, W - 2 * margin):
+                d.text((margin, y), part, font=f_text, fill=dark)
+                y += int(dpi * 0.2)
+        y += int(dpi * 0.05)
+        d.line([(margin, y), (W - margin, y)], fill=(31, 111, 139), width=max(2, dpi // 60))
+        y += int(dpi * 0.15)
+
         fotos = [r for r in p["fotos"] if os.path.exists(project.photo_path(r))]
+        box_top, box_bottom = y, H - margin - int(dpi * 0.15)
         if not fotos:
-            blank = Image.new("RGB", (1240, 300), (245, 245, 245))
-            ImageDraw.Draw(blank).text((60, 120), "Sin fotos", font=_load_font(font_path, 40), fill=(120, 120, 120))
-            page = _header_page(blank, header, font_path)
-            page.save(out_path, "PDF", resolution=page.width / page_width_in, append=True)
-            continue
-        for j, rel in enumerate(fotos):
-            with Image.open(project.photo_path(rel)) as im:
-                photo = im.convert("RGB")
-            lines = list(header)
-            lines[0] = "Punto %d  -  Foto %d de %d" % (p["id"], j + 1, len(fotos))
-            page = _header_page(photo, lines, font_path)
-            del photo
-            page.save(out_path, "PDF", resolution=page.width / page_width_in, append=True, quality=92)
-            del page
+            d.text((margin, box_top + int(dpi * 0.3)), "Sin fotos", font=f_text, fill=grey)
+        else:
+            sizes = []
+            for rel in fotos:
+                with Image.open(project.photo_path(rel)) as im:
+                    sizes.append(im.size)
+            gap = int(dpi * 0.12)
+            label_h = int(dpi * 0.16)
+            box_w, box_h = W - 2 * margin, box_bottom - box_top
+            cols, rows, cw, ch = _grid_layout([(w, h + label_h) for w, h in sizes], box_w, box_h, gap)
+            for k, rel in enumerate(fotos):
+                r, c = divmod(k, cols)
+                cx = margin + c * (cw + gap)
+                cy = box_top + r * (ch + gap)
+                with Image.open(project.photo_path(rel)) as im:
+                    sc = min(cw / im.width, (ch - label_h) / im.height)
+                    tw, th = max(1, int(im.width * sc)), max(1, int(im.height * sc))
+                    im.draft("RGB", (tw, th))  # decodifica reducido: menos memoria
+                    ph = im.convert("RGB").resize((tw, th), Image.LANCZOS)
+                px = int(cx + (cw - tw) / 2)
+                page.paste(ph, (px, int(cy)))
+                del ph
+                d.text((px, int(cy) + th + int(dpi * 0.02)), "Foto %d" % (k + 1), font=f_small, fill=grey)
+        d.text((margin, H - margin), "%s  -  Punto %d" % (project.name, p["id"]), font=f_small, fill=grey)
+        page.save(out_path, "PDF", resolution=float(dpi), append=True, quality=90)
+        del page
     return out_path
 
 
 # --------------------------------------------------------------------------
-# Exportacion a Excel
+# Exportacion para SIG (QGIS / ArcGIS)
 # --------------------------------------------------------------------------
+WGS84_PRJ = ('GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137.0,'
+             '298.257223563]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]]')
+
+
+def _dbf_names(names):
+    """Nombres de campo validos para DBF: ASCII, max 10 caracteres, unicos."""
+    out, used = [], set()
+    for n in names:
+        base = re.sub(r"[^A-Za-z0-9_]", "_", unicodedata.normalize("NFKD", n)
+                      .encode("ascii", "ignore").decode()).strip("_") or "campo"
+        if base[0].isdigit():
+            base = "c_" + base
+        base = base[:10]
+        cand, i = base, 1
+        while cand.lower() in used:
+            suf = "_%d" % i
+            cand = base[:10 - len(suf)] + suf
+            i += 1
+        used.add(cand.lower())
+        out.append(cand)
+    return out
+
+
+def _gis_rows(project):
+    rows = []
+    for p in project.points:
+        rec = {"id": p["id"], "latitud": round(p["lat"], 7), "longitud": round(p["lon"], 7),
+               "fecha": p["fecha"], "precision": p.get("precision_m"),
+               "altitud": p.get("altitud_m"), "n_fotos": len(p["fotos"]),
+               "fotos": ";".join(os.path.basename(f) for f in p["fotos"])}
+        for c in project.columns:
+            rec[c] = p["valores"].get(c, "")
+        rows.append(rec)
+    return rows
+
+
+def export_gis(project, out_zip):
+    """ZIP con la capa de puntos en EPSG:4326 para QGIS / ArcGIS:
+    Shapefile (.shp .shx .dbf .prj .cpg), GeoJSON, KML y CSV."""
+    import csv
+    import io
+    import zipfile
+    import shapefile  # pyshp
+
+    base = slugify(project.name)
+    fixed = ["id", "latitud", "longitud", "fecha", "precision", "altitud", "n_fotos", "fotos"]
+    keys = fixed + list(project.columns)
+    rows = _gis_rows(project)
+
+    with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        # --- Shapefile ---
+        shp, shx, dbf = io.BytesIO(), io.BytesIO(), io.BytesIO()
+        w = shapefile.Writer(shp=shp, shx=shx, dbf=dbf, shapeType=shapefile.POINT, encoding="utf-8")
+        dbf_names = _dbf_names(keys)
+        for k, dn in zip(keys, dbf_names):
+            if k in ("id", "n_fotos"):
+                w.field(dn, "N", 10, 0)
+            elif k in ("latitud", "longitud"):
+                w.field(dn, "N", 14, 7)
+            elif k in ("precision", "altitud"):
+                w.field(dn, "N", 10, 1)
+            else:
+                w.field(dn, "C", 254)
+        for r in rows:
+            w.point(r["longitud"], r["latitud"])
+            w.record(*[r[k] if r[k] is not None else (None if k in ("precision", "altitud") else "")
+                       for k in keys])
+        w.close()
+        zf.writestr(base + ".shp", shp.getvalue())
+        zf.writestr(base + ".shx", shx.getvalue())
+        zf.writestr(base + ".dbf", dbf.getvalue())
+        zf.writestr(base + ".prj", WGS84_PRJ)
+        zf.writestr(base + ".cpg", "UTF-8")
+        if any(dn != k for k, dn in zip(keys, dbf_names)):
+            zf.writestr(base + "_campos_shapefile.txt", "Nombre en el shapefile -> nombre original\n" +
+                        "\n".join("%s -> %s" % (dn, k) for k, dn in zip(keys, dbf_names)))
+
+        # --- GeoJSON ---
+        gj = {"type": "FeatureCollection", "name": base,
+              "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}},
+              "features": [{"type": "Feature",
+                            "geometry": {"type": "Point", "coordinates": [r["longitud"], r["latitud"]]},
+                            "properties": {k: r[k] for k in keys}} for r in rows]}
+        zf.writestr(base + ".geojson", json.dumps(gj, ensure_ascii=False, indent=1))
+
+        # --- KML (Google Earth) ---
+        from xml.sax.saxutils import escape
+        pm = []
+        for r in rows:
+            data = "".join('<Data name="%s"><value>%s</value></Data>' % (escape(str(k)), escape(str(r[k] if r[k] is not None else "")))
+                           for k in keys)
+            pm.append("<Placemark><name>Punto %s</name><ExtendedData>%s</ExtendedData>"
+                      "<Point><coordinates>%s,%s,0</coordinates></Point></Placemark>"
+                      % (r["id"], data, r["longitud"], r["latitud"]))
+        kml = ('<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2">'
+               "<Document><name>%s</name>%s</Document></kml>" % (escape(project.name), "".join(pm)))
+        zf.writestr(base + ".kml", kml)
+
+        # --- CSV (X = longitud, Y = latitud) ---
+        buf = io.StringIO()
+        cw = csv.writer(buf)
+        cw.writerow(keys)
+        for r in rows:
+            cw.writerow(["" if r[k] is None else r[k] for k in keys])
+        zf.writestr(base + ".csv", "\ufeff" + buf.getvalue())
+
+        zf.writestr("LEEME.txt", (
+            "Proyecto: %s\nSistema de coordenadas: %s\nPuntos: %d\n\n"
+            "QGIS: arrastra el .shp o el .geojson al mapa.\n"
+            "ArcGIS: agrega el .shp (Add Data).\n"
+            "Google Earth: abre el .kml.\n"
+            "CSV: X = longitud, Y = latitud, EPSG:4326.\n") % (project.name, CRS_LABEL, len(rows)))
+    return out_zip
+
+
 def export_excel(project, out_path, thumb_px=220):
     """Hoja 1: datos. Hoja 2: mismos datos + fotos en columnas a la derecha."""
     from openpyxl import Workbook

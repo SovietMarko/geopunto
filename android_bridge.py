@@ -194,3 +194,138 @@ def keep_screen_on(on=True):
         _set()
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# GPS
+# ---------------------------------------------------------------------------
+# Se usa el receptor GPS satelital directamente (proveedor "gps"), que funciona
+# sin datos moviles ni wifi. El proveedor "network" solo se usa, si existe, para
+# una primera posicion aproximada mientras llegan los satelites.
+class GPSReader(object):
+    """callback(lat, lon, accuracy_m, provider, altitude). status_cb(texto)."""
+
+    def __init__(self, callback, status_cb=None):
+        self.callback = callback
+        self.status_cb = status_cb or (lambda t: None)
+        self._lm = None
+        self._listener = None
+        self.started = False
+
+    def _status(self, text):
+        Clock.schedule_once(lambda dt: self.status_cb(text))
+
+    def has_precise_permission(self):
+        if not IS_ANDROID:
+            return True
+        try:
+            return _activity().checkSelfPermission("android.permission.ACCESS_FINE_LOCATION") == 0
+        except Exception:
+            return True
+
+    def gps_enabled(self):
+        if not IS_ANDROID or self._lm is None:
+            return True
+        try:
+            return bool(self._lm.isProviderEnabled("gps"))
+        except Exception:
+            return True
+
+    def start(self):
+        if not IS_ANDROID or self.started:
+            return
+        from jnius import autoclass, java_method, PythonJavaClass
+        reader = self
+
+        class _Listener(PythonJavaClass):
+            __javainterfaces__ = ["android/location/LocationListener"]
+
+            @java_method("(Landroid/location/Location;)V")
+            def onLocationChanged(self, loc):
+                reader._deliver(loc)
+
+            @java_method("(Ljava/util/List;)V", name="onLocationChanged")
+            def onLocationChangedList(self, locs):  # API 31+: lote de posiciones
+                try:
+                    for i in range(locs.size()):
+                        reader._deliver(locs.get(i))
+                except Exception:
+                    pass
+
+            @java_method("(I)V")
+            def onFlushComplete(self, code):
+                pass
+
+            @java_method("(Ljava/lang/String;)V")
+            def onProviderEnabled(self, provider):
+                if provider == "gps":
+                    reader._status("GPS activado, esperando satelites...")
+
+            @java_method("(Ljava/lang/String;)V")
+            def onProviderDisabled(self, provider):
+                if provider == "gps":
+                    reader._status("El GPS del telefono esta apagado")
+
+            @java_method("(Ljava/lang/String;ILandroid/os/Bundle;)V")
+            def onStatusChanged(self, provider, status, extras):
+                pass
+
+        Context = autoclass("android.content.Context")
+        Looper = autoclass("android.os.Looper")
+        self._lm = _activity().getSystemService(Context.LOCATION_SERVICE)
+        self._listener = _Listener()
+        ok = False
+        for provider, min_time in (("gps", 1000), ("network", 5000)):
+            try:
+                if self._lm.getProvider(provider) is None:
+                    continue
+                self._lm.requestLocationUpdates(provider, min_time, 0.0, self._listener,
+                                                Looper.getMainLooper())
+                ok = ok or provider == "gps"
+            except Exception as exc:
+                Logger.warning("Geopunto: proveedor %s no disponible: %s" % (provider, exc))
+        # posicion previa (si existe) para no empezar de cero
+        try:
+            last = self._lm.getLastKnownLocation("gps")
+            if last is not None:
+                self._deliver(last, stale=True)
+        except Exception:
+            pass
+        self.started = True
+        if not ok:
+            self._status("No se pudo iniciar el GPS (revisa permisos de ubicacion precisa)")
+        elif not self.gps_enabled():
+            self._status("El GPS del telefono esta apagado")
+        else:
+            self._status("Esperando satelites (al aire libre, sin datos puede tardar 1-3 min)")
+
+    def _deliver(self, loc, stale=False):
+        try:
+            acc = float(loc.getAccuracy()) if loc.hasAccuracy() else None
+            alt = float(loc.getAltitude()) if loc.hasAltitude() else None
+            data = (float(loc.getLatitude()), float(loc.getLongitude()), acc,
+                    "cache" if stale else str(loc.getProvider()), alt)
+        except Exception as exc:
+            Logger.warning("Geopunto: posicion invalida: %s" % exc)
+            return
+        Clock.schedule_once(lambda dt: self.callback(*data))
+
+    def stop(self):
+        if self._lm is not None and self._listener is not None:
+            try:
+                self._lm.removeUpdates(self._listener)
+            except Exception:
+                pass
+        self.started = False
+
+
+def open_location_settings():
+    if not IS_ANDROID:
+        return
+    try:
+        from jnius import autoclass
+        Intent = autoclass("android.content.Intent")
+        Settings = autoclass("android.provider.Settings")
+        _activity().startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+    except Exception:
+        pass

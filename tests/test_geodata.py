@@ -80,3 +80,34 @@ def test_photo_pdf(tmp_path):
     data = open(out, "rb").read()
     assert data.startswith(b"%PDF")
     assert data.count(b"/Type /Page\n") + data.count(b"/Type /Page ") >= 4 or data.count(b"/Page") >= 4
+
+
+def test_average_fixes():
+    s = [(4.0, -74.0, 4.0, 2600.0), (4.00001, -74.00001, 4.0, 2601.0), (4.01, -74.01, 40.0, 2700.0)]
+    lat, lon, acc, alt, n = geodata.average_fixes(s)
+    assert n == 2  # la lectura de 40 m se descarta
+    assert lat == pytest.approx(4.000005) and lon == pytest.approx(-74.000005)
+    assert acc == 4.0 and alt == pytest.approx(2600.5)
+
+
+def test_export_gis(tmp_path):
+    import io, json, zipfile
+    import shapefile
+    proj = geodata.Project.create(str(tmp_path), "Finca Ñandú", ["Especie arbórea", "Especie arbórea 2"])
+    p = proj.new_point(4.6097102, -74.08175, 3.2, altitude=2600, samples=8)
+    p["valores"]["Especie arbórea"] = "Roble"
+    proj.save_point(p)
+    out = str(tmp_path / "sig.zip")
+    geodata.export_gis(proj, out)
+    zf = zipfile.ZipFile(out)
+    names = set(zf.namelist())
+    for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg", ".geojson", ".kml", ".csv"):
+        assert "Finca_Nandu" + ext in names
+    r = shapefile.Reader(shp=io.BytesIO(zf.read("Finca_Nandu.shp")), shx=io.BytesIO(zf.read("Finca_Nandu.shx")),
+                         dbf=io.BytesIO(zf.read("Finca_Nandu.dbf")), encoding="utf-8")
+    assert r.shape(0).points[0] == pytest.approx([-74.08175, 4.6097102])
+    fields = [f[0] for f in r.fields[1:]]
+    assert len(set(fields)) == len(fields) and all(len(f) <= 10 for f in fields)
+    assert "Roble" in list(r.record(0))
+    gj = json.loads(zf.read("Finca_Nandu.geojson"))
+    assert gj["features"][0]["properties"]["Especie arbórea"] == "Roble"

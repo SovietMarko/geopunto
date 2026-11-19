@@ -25,11 +25,20 @@ con marca de agua y exportar todo a Excel.
      `Foto_1` ... `Foto_5` a la derecha.
    El archivo queda en **Documentos/Geopunto** del teléfono y el botón
    **Compartir** permite enviarlo por WhatsApp, correo, Drive, etc.
-6. **PDF fotos**: crea el registro fotográfico en PDF con una portada y una
-   página por foto. Cada página lleva el número de punto, la primera columna de
-   tu tabla, la coordenada y la fecha, y la foto en su resolución original con
-   la marca de agua en la esquina inferior derecha. Se guarda en
-   **Documentos/Geopunto**.
+6. **PDF fotos**: registro fotográfico con portada y una hoja por punto. Cada
+   hoja lleva el número de punto, la primera columna de tu tabla, la
+   coordenada, la precisión y la fecha, y todas las fotos del punto; su tamaño
+   se ajusta a cuántas fotos tenga (1 foto ocupa casi toda la hoja).
+7. **SIG**: ZIP con la capa de puntos en EPSG:4326 para QGIS o ArcGIS:
+   Shapefile (.shp, .shx, .dbf, .prj, .cpg), GeoJSON, KML (Google Earth) y CSV.
+
+## GPS y precisión
+- La app usa el **GPS satelital** directamente, así que funciona **sin datos
+  móviles ni wifi**. Sin datos, la primera posición puede tardar 1 a 3 minutos
+  al aire libre.
+- Al pulsar **Tomar punto aquí** se juntan hasta 15 lecturas del GPS y se
+  promedian (las más precisas pesan más). Termina sola o con *Usar ahora*.
+- Activa la **ubicación precisa** para Geopunto en los permisos de Android.
 
 ## Archivos
 

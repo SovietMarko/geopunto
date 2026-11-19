@@ -264,7 +264,7 @@ KV = r"""
         BoxLayout:
             orientation: 'vertical'
             size_hint_y: None
-            height: dp(176)
+            height: dp(184)
             padding: dp(8)
             spacing: dp(6)
             canvas.before:
@@ -300,6 +300,10 @@ KV = r"""
                     height: dp(48)
                     text: 'PDF fotos'
                     on_release: app.export_pdf()
+                AppButton:
+                    height: dp(48)
+                    text: 'SIG'
+                    on_release: app.export_gis()
 
 <PointScreen>:
     BoxLayout:
@@ -576,17 +580,26 @@ class MapScreen(Screen):
 
     def update_status(self):
         app = App.get_running_app()
-        if app.gps_fix:
-            lat, lon, acc = app.gps_fix
-            acc_txt = (" (+/- %.0f m)" % acc) if acc else ""
-            self.status_text = ("[b]Lat:[/b] %s   [b]Lon:[/b] %s%s\n[size=12sp]EPSG:4326 - WGS 84[/size]"
-                                % (format_coord(lat), format_coord(lon), acc_txt))
+        fix = app.gps_fix
+        if fix:
+            lat, lon, acc, prov = fix[0], fix[1], fix[2], fix[3]
+            if acc is None:
+                acc_txt, col = "", "555555"
+            else:
+                col = "2e7d32" if acc <= 5 else ("ef6c00" if acc <= 15 else "c62828")
+                acc_txt = "  [color=%s][b]+/- %.0f m[/b][/color]" % (col, acc)
+            src = {"gps": "GPS satelital", "network": "red (aproximada)",
+                   "cache": "ultima posicion guardada"}.get(prov, prov or "")
+            if prov != "gps" and droid.IS_ANDROID:
+                src += " - esperando satelites"
+            self.status_text = ("[b]Lat:[/b] %s   [b]Lon:[/b] %s%s\n[size=12sp]EPSG:4326 - WGS 84  |  %s[/size]"
+                                % (format_coord(lat), format_coord(lon), acc_txt, src))
             self.show_cross = False
         elif not droid.IS_ANDROID:
             self.status_text = "PC sin GPS: se usara el centro del mapa (+)\n[size=12sp]EPSG:4326 - WGS 84[/size]"
             self.show_cross = True
         else:
-            self.status_text = "Buscando senal GPS...  " + (app.gps_status or "")
+            self.status_text = "Buscando senal GPS...\n[size=12sp]%s[/size]" % (app.gps_status or "")
 
     def center_on_me(self):
         app = App.get_running_app()
@@ -597,20 +610,91 @@ class MapScreen(Screen):
 
     def take_point(self):
         app = App.get_running_app()
-        if app.gps_fix:
-            lat, lon, acc = app.gps_fix
-            app.new_point(lat, lon, acc)
-            return
         mv = self.ids.map
 
         def _use_center():
             app.new_point(mv.lat, mv.lon, None)
-        if droid.IS_ANDROID:
-            self.show_cross = True
-            message("Sin senal GPS", "Aun no hay posicion GPS.\nPuedes esperar o usar el centro del mapa (+).",
-                    (("Esperar", None), ("Usar centro", _use_center)))
-        else:
-            _use_center()
+        if not droid.IS_ANDROID:
+            if app.gps_fix:
+                app.new_point(app.gps_fix[0], app.gps_fix[1], app.gps_fix[2])
+            else:
+                _use_center()
+            return
+        if not app.gps.gps_enabled():
+            message("GPS apagado", "La ubicacion del telefono esta apagada.\nActivala para tomar coordenadas.",
+                    (("Cancelar", None), ("Abrir ajustes", droid.open_location_settings)))
+            return
+        CapturePopup(on_done=lambda r: app.new_point(r[0], r[1], r[2], altitude=r[3], samples=r[4]),
+                     on_center=_use_center).open()
+
+
+class CapturePopup(Popup):
+    """Junta varias lecturas del GPS satelital y las promedia para mejorar la
+    precision. Termina sola al llegar a MAX_SAMPLES o con 'Usar ahora'."""
+    MAX_SAMPLES = 15
+    TARGET_ACC = 3.0
+
+    def __init__(self, on_done, on_center, **kw):
+        self._done_cb, self._center_cb = on_done, on_center
+        self.samples = []
+        self.t0 = datetime.now()
+        box = BoxLayout(orientation="vertical", padding=dp(10), spacing=dp(8))
+        self.lbl = Label(text="Esperando lecturas del GPS...", color=(1, 1, 1, 1), markup=True,
+                         halign="left", valign="top")
+        self.lbl.bind(size=lambda w, sz: setattr(w, "text_size", (sz[0], None)))
+        box.add_widget(self.lbl)
+        row = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
+        b1 = Button(text="Cancelar")
+        self.b_center = Button(text="Centro mapa")
+        self.b_use = Button(text="Usar ahora", disabled=True)
+        b1.bind(on_release=lambda *_: self.finish(None))
+        self.b_center.bind(on_release=lambda *_: self.finish("center"))
+        self.b_use.bind(on_release=lambda *_: self.finish("use"))
+        for b in (b1, self.b_center, self.b_use):
+            row.add_widget(b)
+        box.add_widget(row)
+        super(CapturePopup, self).__init__(title="Mejorando precision del punto", content=box,
+                                           size_hint=(0.94, None), height=dp(300), auto_dismiss=False, **kw)
+        app = App.get_running_app()
+        app.sample_listener = self.add_sample
+        self._ev = Clock.schedule_interval(self.refresh, 1.0)
+        self.refresh()
+
+    def add_sample(self, lat, lon, acc, provider, alt):
+        if provider != "gps":
+            return
+        self.samples.append((lat, lon, acc, alt))
+        self.refresh()
+        accs = [x[2] for x in self.samples if x[2]]
+        if len(self.samples) >= self.MAX_SAMPLES or (len(self.samples) >= 5 and accs and max(accs[-5:]) <= self.TARGET_ACC):
+            self.finish("use")
+
+    def refresh(self, *a):
+        secs = int((datetime.now() - self.t0).total_seconds())
+        n = len(self.samples)
+        if n == 0:
+            self.lbl.text = ("Esperando lecturas del GPS satelital... (%d s)\n\n"
+                             "[size=13sp]Sin datos moviles el primer posicionamiento puede tardar 1 a 3 "
+                             "minutos. Quedate al aire libre, lejos de techos y edificios.[/size]" % secs)
+            return
+        lat, lon, est, alt, used = geodata.average_fixes(self.samples)
+        self.b_use.disabled = False
+        last = self.samples[-1][2]
+        self.lbl.text = ("Lecturas: [b]%d de %d[/b]   (%d s)\nPrecision actual: [b]+/- %s m[/b]\n"
+                         "Promedio: %s, %s\n\n[size=13sp]Manten el telefono quieto en el punto. "
+                         "Se termina solo, o pulsa 'Usar ahora'.[/size]" % (
+                             n, self.MAX_SAMPLES, secs, ("%.1f" % last) if last else "?",
+                             format_coord(lat), format_coord(lon)))
+
+    def finish(self, how):
+        app = App.get_running_app()
+        app.sample_listener = None
+        self._ev.cancel()
+        self.dismiss()
+        if how == "use" and self.samples:
+            self._done_cb(geodata.average_fixes(self.samples))
+        elif how == "center":
+            self._center_cb()
 
 
 class PointScreen(Screen):
@@ -631,7 +715,7 @@ class PointScreen(Screen):
         self.header_text = ("[b]Latitud:[/b] %s\n[b]Longitud:[/b] %s\n[b]Fecha:[/b] %s%s\n"
                             "[size=12sp]EPSG:4326 - WGS 84[/size]" % (
                                 format_coord(point["lat"]), format_coord(point["lon"]), point["fecha"],
-                                ("\n[b]Precision:[/b] +/- %.0f m" % acc) if acc else ""))
+                                ("\n[b]Precision:[/b] +/- %.1f m  (%d lecturas)" % (acc, point.get("muestras", 1))) if acc else ""))
         box = self.ids.fields
         box.clear_widgets()
         self.inputs = {}
@@ -763,6 +847,7 @@ class GeopuntoApp(App):
     project = ObjectProperty(None, allownone=True)
     gps_fix = ObjectProperty(None, allownone=True)
     gps_status = StringProperty("")
+    sample_listener = None
     default_layer = StringProperty(DEFAULT_LAYER)
     layer_names = list(MAP_LAYERS.keys())
 
@@ -776,6 +861,7 @@ class GeopuntoApp(App):
         for d in (self.projects_dir, self.export_dir, self.cache_dir):
             os.makedirs(d, exist_ok=True)
         self.history = []
+        self.gps = droid.GPSReader(self._on_location, self._on_gps_status)
         Builder.load_string(KV)
         self.sm = ScreenManager(transition=NoTransition())
         self.sm.add_widget(HomeScreen(name="home"))
@@ -799,39 +885,39 @@ class GeopuntoApp(App):
         if not droid.IS_ANDROID:
             return
         try:
-            from plyer import gps
-            gps.configure(on_location=self._on_location, on_status=self._on_gps_status)
-            gps.start(minTime=1000, minDistance=0)
-            self._gps = gps
+            self.gps.start()
         except Exception as e:
             self.gps_status = "GPS no disponible: %s" % e
+        if not self.gps.has_precise_permission():
+            message("Ubicacion precisa", "La app solo tiene permiso de ubicacion aproximada.\n"
+                    "En Ajustes > Apps > Geopunto > Permisos > Ubicacion, activa 'Usar ubicacion precisa'.")
+        self._refresh_status()
 
-    @mainthread
-    def _on_location(self, **kw):
-        lat, lon = kw.get("lat"), kw.get("lon")
-        if lat is None or lon is None:
+    def _on_location(self, lat, lon, acc, provider, alt):
+        cur = self.gps_fix
+        # una posicion de red no reemplaza una del GPS reciente y mejor
+        if provider != "gps" and cur and cur[3] == "gps" and \
+                (datetime.now() - cur[5]).total_seconds() < 15:
             return
-        self.gps_fix = (float(lat), float(lon), kw.get("accuracy"))
-        self.sm.get_screen("map").on_gps(*self.gps_fix)
+        self.gps_fix = (lat, lon, acc, provider, alt, datetime.now())
+        if self.sample_listener:
+            self.sample_listener(lat, lon, acc, provider, alt)
+        self.sm.get_screen("map").on_gps(lat, lon, acc)
 
-    @mainthread
-    def _on_gps_status(self, stype, status):
-        self.gps_status = "%s" % status
+    def _on_gps_status(self, text):
+        self.gps_status = text
+        self._refresh_status()
+
+    def _refresh_status(self):
         if self.sm.current == "map":
             self.sm.get_screen("map").update_status()
 
     def on_pause(self):
-        try:
-            self._gps.stop()
-        except Exception:
-            pass
-        return True
+        return True  # el GPS sigue activo mientras se usa la camara
 
     def on_resume(self):
-        try:
-            self._gps.start(minTime=1000, minDistance=0)
-        except Exception:
-            pass
+        if droid.IS_ANDROID and not self.gps.started:
+            self.start_gps()
 
     # ----- Navegacion -----
     def open_screen(self, name, replace_history=False):
@@ -869,8 +955,8 @@ class GeopuntoApp(App):
             self.open_screen("map")
         self.sm.get_screen("map").set_layer(self.sm.get_screen("map").ids.layer.text)
 
-    def new_point(self, lat, lon, acc):
-        point = self.project.new_point(lat, lon, acc, datetime.now())
+    def new_point(self, lat, lon, acc, altitude=None, samples=1):
+        point = self.project.new_point(lat, lon, acc, datetime.now(), altitude=altitude, samples=samples)
         self.sm.get_screen("point").load(self.project, point, True)
         self.open_screen("point")
 
@@ -891,8 +977,12 @@ class GeopuntoApp(App):
             return
         self._export("pdf", "Generando PDF de fotos...\n(puede tardar con muchas fotos)",
                      lambda proj, out: geodata.export_photo_pdf(proj, out, WATERMARK_FONT),
-                     "PDF listo", "Una pagina por foto con punto, coordenada,\nfecha y %s." % (
+                     "PDF listo", "Una hoja por punto con todas sus fotos,\ncoordenada, fecha y %s." % (
                          self.project.columns[0] if self.project.columns else "datos"))
+
+    def export_gis(self):
+        self._export("zip", "Generando capa SIG...", geodata.export_gis, "Capa SIG lista",
+                     "ZIP con Shapefile, GeoJSON, KML y CSV\n(EPSG:4326). Abrelo en QGIS o ArcGIS.")
 
     def _export(self, ext, busy_text, func, title, detail):
         if not self.project.points:
